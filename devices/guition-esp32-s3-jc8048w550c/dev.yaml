@@ -1,0 +1,24 @@
+# =============================================================================
+# DEV CONFIG - Local development entry point (5" S3 800x480 panel)
+# Flash with: esphome run dev.yaml
+# Or via Docker:
+#   docker run --rm -v "${PWD}/../..:/config" \
+#     ghcr.io/esphome/esphome:2026.4.0 \
+#     run /config/devices/guition-esp32-s3-jc8048w550c/dev.yaml
+# =============================================================================
+
+substitutions:
+  name: "esp32-s3-jc8048w550c-dev"
+  friendly_name: "Guition JC8048W550C Dev"
+  espcontrol_component_url: "file:///Users/scottgoldberg/GitHub/espcontrol"
+  espcontrol_component_ref: "HEAD"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+web_server:
+  js_url: http://10.0.1.51:8765/webserver/guition-esp32-s3-jc8048w550c/www.js
+
+packages:
+  espcontrol: !include packages.yaml

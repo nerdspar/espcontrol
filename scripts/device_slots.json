@@ -68,6 +68,19 @@
       "volume_label_font": "label_font_sm",
       "color_correction": false,
       "wrap_tall_labels": false
+    },
+    {
+      "slug": "guition-esp32-s3-jc8048w550c",
+      "slots": 12,
+      "cols": 4,
+      "grid": "3x4",
+      "icon_font": "icon_font_sm",
+      "sensor_font": "statistics_font_sm",
+      "media_title_font": "media_title_font_sm",
+      "volume_number_font": "volume_modal_number_font",
+      "volume_label_font": "label_font_sm",
+      "color_correction": false,
+      "wrap_tall_labels": false
     }
   ]
 }

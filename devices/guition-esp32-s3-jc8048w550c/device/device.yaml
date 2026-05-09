@@ -1,0 +1,267 @@
+# =============================================================================
+# DEVICE - Guition ESP32-S3 JC8048W550C hardware definition
+# =============================================================================
+# Pin assignments, peripherals, and platform config for the 5" 800x480 panel.
+# Includes the ESP32-S3-WROOM-1 N16R8 SoC (16MB flash, 8MB octal PSRAM,
+# native WiFi/BT), parallel RGB display (no SPI panel init), GT911
+# capacitive touchscreen at I2C 0x5D, and backlight PWM on GPIO2.
+#
+# PORTING NOTES vs. 4848S040 reference:
+#   - Display platform: rpi_dpi_rgb (not mipi_rgb). The JC8048W550C panel
+#     has no SPI command bus to send init sequences — it's pure DPI/RGB.
+#   - I2C SCL is GPIO20 (not GPIO45). GPIO45/47/48 are RGB data lines on
+#     this board, so the SPI block from the 4848S040 reference is removed.
+#   - Backlight on GPIO2 (not GPIO38). 1220Hz PWM matches the panel's
+#     reference design from agillis/esphome-modular-lvgl-buttons.
+#   - invert_colors: true is required — verified across multiple working
+#     JC8048W550 ESPHome configs.
+#   - No on-board relays on this variant; relay registration removed.
+#   - Pin map sourced from agillis/esphome-modular-lvgl-buttons (working
+#     reference) and openhasp.com/0.7.0/hardware/guition/jc8048w550/.
+# =============================================================================
+
+substitutions:
+  espcontrol_component_url: "https://github.com/jtenniswood/espcontrol"
+  espcontrol_component_ref: "main"
+
+# ---------------------------------------------------------------------------
+# ESP32-S3 platform (16MB flash, ESP-IDF framework)
+# ---------------------------------------------------------------------------
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: 5.5.2
+    source: https://github.com/pioarduino/esp-idf/releases/download/v5.5.2/esp-idf-v5.5.2.tar.xz
+    platform_version: 55.03.37
+    advanced:
+      execute_from_psram: true
+    sdkconfig_options:
+      # The S3 display stack leaves little internal RAM for HTTPS OTA checks.
+      # Allocate mbedTLS buffers from PSRAM so firmware downloads can connect.
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      # Keep WiFi startup inside the internal-RAM budget after the RGB display
+      # and LVGL buffers are initialized.
+      CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM: "8"
+      CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP: "y"
+
+# ---------------------------------------------------------------------------
+# External component
+# ---------------------------------------------------------------------------
+external_components:
+  - source:
+      type: git
+      url: ${espcontrol_component_url}
+      ref: ${espcontrol_component_ref}
+      path: components
+    components: [espcontrol, web_server_idf]
+    refresh: 0s
+
+espcontrol:
+
+# ---------------------------------------------------------------------------
+# ESPHome core
+# ---------------------------------------------------------------------------
+# ESP32-S3 with octal PSRAM and RGB display fails to reinitialize peripherals
+# after a software reset. A brief deep sleep forces a full hardware reset on
+# wake, equivalent to a power cycle. Mirrors the 4848S040 reference behaviour.
+# ---------------------------------------------------------------------------
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: 800
+      then:
+        - lambda: |-
+            auto reason = esp_reset_reason();
+            if (reason == ESP_RST_USB || reason == ESP_RST_SW) {
+              esp_sleep_enable_timer_wakeup(100000);
+              esp_deep_sleep_start();
+            }
+    - priority: -100
+      then:
+        - script.execute: apply_screen_rotation
+
+# ---------------------------------------------------------------------------
+# PSRAM (video frame buffer memory) - 8MB octal on N16R8 module
+# ---------------------------------------------------------------------------
+psram:
+  mode: octal
+  speed: 80MHz
+
+# ---------------------------------------------------------------------------
+# OTA updates (ESPHome native + HTTP-based)
+# ---------------------------------------------------------------------------
+ota:
+  - platform: esphome
+    on_begin:
+      then:
+        - light.turn_off: display_backlight
+    on_end:
+      then:
+        - lambda: |-
+            esp_sleep_enable_timer_wakeup(100000);
+            esp_deep_sleep_start();
+  - platform: http_request
+
+# ---------------------------------------------------------------------------
+# Shared infrastructure (API, logging, web server, restart button)
+# ---------------------------------------------------------------------------
+packages:
+  core_infra: !include ../../../common/device/core_infra.yaml
+
+# 800x480 frame buffer + LVGL + web UI + API runs close to internal RAM limit.
+# Keep API connection pool small for the same reason as 4848S040.
+api:
+  listen_backlog: 2
+  max_connections: 2
+  max_send_queue: 4
+
+logger:
+  hardware_uart: UART0
+
+wifi:
+  use_psram: true
+
+# ---------------------------------------------------------------------------
+# Backlight (LEDC PWM output + monochromatic light entity)
+# ---------------------------------------------------------------------------
+output:
+  - platform: ledc
+    pin: GPIO2
+    id: gpio_backlight_pwm
+    frequency: 1220Hz
+    min_power: 0.01
+    zero_means_zero: true
+
+light:
+  - platform: monochromatic
+    output: gpio_backlight_pwm
+    name: Display Backlight
+    icon: mdi:lightbulb-on
+    id: display_backlight
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 0s
+    gamma_correct: 1.0
+    on_turn_on:
+      then:
+        - if:
+            condition:
+              lambda: |-
+                return id(screen_schedule_asleep) ||
+                       (id(schedule_enabled).state && !panel_time_or_fallback(id(panel_time).now(), id(homeassistant_time).now()).is_valid());
+            then:
+              - script.execute: backlight_force_display_off
+            else:
+              - if:
+                  condition:
+                    lambda: 'return id(screensaver_display_off_active);'
+                  then:
+                    - script.execute: screensaver_wake
+
+# ---------------------------------------------------------------------------
+# I2C bus and GT911 capacitive touchscreen
+# ---------------------------------------------------------------------------
+i2c:
+  - id: bus_a
+    sda: GPIO19
+    scl: GPIO20
+    scan: true
+
+touchscreen:
+  - platform: gt911
+    id: my_touchscreen
+    i2c_id: bus_a
+    address: 0x5D
+    display: my_display
+    update_interval: 16ms
+    on_touch:
+      - script.execute: screensaver_wake
+
+# ---------------------------------------------------------------------------
+# Display (5" 800x480 parallel RGB IPS panel)
+# ---------------------------------------------------------------------------
+# Uses rpi_dpi_rgb (raw parallel RGB) — the JC8048W550C has no SPI command
+# bus to send init sequences, so mipi_rgb is not applicable here.
+# Pin map verified against agillis/esphome-modular-lvgl-buttons (working).
+# ---------------------------------------------------------------------------
+display:
+  - platform: rpi_dpi_rgb
+    id: my_display
+    color_order: RGB
+    invert_colors: true
+    update_interval: never
+    auto_clear_enabled: false
+    # Start WiFi before the RGB panel allocates its frame buffers; otherwise
+    # the WiFi driver can fail to claim enough internal RX buffers on fresh
+    # boots. Mirrors the 4848S040 reference.
+    setup_priority: 240
+    dimensions:
+      width: 800
+      height: 480
+    de_pin: GPIO40
+    hsync_pin: GPIO39
+    vsync_pin: GPIO41
+    pclk_pin: GPIO42
+    pclk_frequency: 16MHz
+    data_pins:
+      red:   [GPIO45, GPIO48, GPIO47, GPIO21, GPIO14]
+      green: [GPIO5,  GPIO6,  GPIO7,  GPIO15, GPIO16, GPIO4]
+      blue:  [GPIO8,  GPIO3,  GPIO46, GPIO9,  GPIO1]
+
+# ---------------------------------------------------------------------------
+# LVGL base (display binding, must be before any page definitions)
+# ---------------------------------------------------------------------------
+lvgl:
+  id: main_lvgl
+  setup_priority: 230
+  buffer_size: 25%
+  displays: my_display
+  rotation: 0
+  touchscreens:
+    - touchscreen_id: my_touchscreen
+      long_press_time: 3s
+
+script:
+  - id: apply_screen_rotation
+    then:
+      - if:
+          condition:
+            lambda: 'return id(screen_rotation_select).current_option() == "90";'
+          then:
+            - lvgl.display.set_rotation: 90
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(screen_rotation_select).current_option() == "180";'
+                then:
+                  - lvgl.display.set_rotation: 180
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(screen_rotation_select).current_option() == "270";'
+                      then:
+                        - lvgl.display.set_rotation: 270
+                      else:
+                        - lvgl.display.set_rotation: 0
+
+select:
+  - platform: template
+    name: "Screen: Rotation"
+    internal: true
+    disabled_by_default: true
+    id: screen_rotation_select
+    entity_category: config
+    icon: "mdi:screen-rotation"
+    optimistic: true
+    restore_value: true
+    initial_option: "0"
+    options:
+      - "0"
+      - "90"
+      - "180"
+      - "270"
+    on_value:
+      then:
+        - script.execute: apply_screen_rotation
