@@ -18,7 +18,7 @@ wifi:
   password: !secret wifi_password
 
 web_server:
-  js_url: http://10.0.1.51:8765/webserver/guition-esp32-s3-jc8048w550c/www.js
+  js_url: https://nerdspar.github.io/espcontrol/webserver/guition-esp32-s3-jc8048w550c/www.js
 
 packages:
   espcontrol: !include packages.yaml
