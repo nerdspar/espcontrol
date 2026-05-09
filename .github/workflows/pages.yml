@@ -120,13 +120,18 @@ jobs:
           fi
 
       - name: Verify firmware assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           MISSING=false
           OPTIONAL_FIRMWARE_SLUGS="guition-esp32-p4-jc8012p4a1 esp32-p4-86"
+          # On forks with no releases yet, all firmware is optional
+          HAS_RELEASES=$(gh release list --limit 1 --json tagName -q 'length > 0' 2>/dev/null || echo 'false')
           for SLUG in $DEVICE_SLUGS; do
             MANIFEST="firmware/${SLUG}/manifest.json"
             if [ ! -f "$MANIFEST" ]; then
-              if echo " ${OPTIONAL_FIRMWARE_SLUGS} " | grep -q " ${SLUG} "; then
+              if [ "$HAS_RELEASES" = "false" ] || echo " ${OPTIONAL_FIRMWARE_SLUGS} " | grep -q " ${SLUG} "; then
                 echo "::warning::No firmware manifest found for ${SLUG} yet — install button will work after the first release asset is published"
               else
                 echo "::error::No firmware manifest found for ${SLUG} — install page will be non-functional"
